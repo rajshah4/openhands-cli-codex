@@ -1,4 +1,4 @@
-#!/Users/rajiv.shah/Code/litellm/.venv/bin/python3
+#!/Users/rajiv.shah/Code/openhands-cli-codex/.venv/bin/python3
 import json
 import sys
 import tomllib

@@ -83,7 +83,7 @@ Notes:
 - The runner reads `[llm].model` and uses that as the Codex model.
 - The condenser model in `config.toml` does not control the subscription path directly; the runner replaces both the main LLM and condenser at runtime.
 - `api_key = "not-needed"` is just a placeholder so OpenHands config stays happy.
-- Replace `"/Users/yourname/Code/yourproject"` with the actual local project directory you want OpenHands to work in, for example `"/Users/rajiv.shah/Code/litellm"`.
+- Replace `"/Users/yourname/Code/yourproject"` with the actual local project directory you want OpenHands to work in, for example `"/Users/rajiv.shah/Code/openhands-cli-codex"`.
 
 ## 4. Authenticate Once
 
