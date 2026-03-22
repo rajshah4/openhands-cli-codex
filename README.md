@@ -171,6 +171,12 @@ For `openhands-codex`, the runner overrides those settings at runtime, so seeing
 
 No. Restart the `openhands-codex` session after updating the runner.
 
+### Should I set `stream=False` to fix `Streaming requires an on_token callback`?
+
+No. That change can break otherwise working conversations in this setup.
+
+The correct behavior for this runner is the original `stream=True` configuration in `openhands-codex`. If you hit a transient streaming-related error, do not "fix" it by flipping the runner to `stream=False` unless you have confirmed a newer OpenHands/SDK version actually requires a different transport contract.
+
 ### Can I change the model?
 
 Yes. Change `[llm].model` in `~/.openhands/config.toml` to another Codex model your account supports, then restart `openhands-codex`.
