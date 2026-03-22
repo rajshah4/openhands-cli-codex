@@ -2,6 +2,8 @@
 
 This folder contains the two helper scripts needed to run OpenHands CLI with your ChatGPT Codex subscription instead of paying through an API key or the OpenHands Cloud LLM proxy.
 
+![OpenHands Codex CLI screenshot](assets/codex-cli.png)
+
 Use this if you want:
 
 - OpenHands CLI
