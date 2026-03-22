@@ -1,178 +1,149 @@
 #!/Users/rajiv.shah/Code/litellm/.venv/bin/python3
-import sys
 import json
-import os
-import base64
-import copy
+import sys
+import tomllib
 from pathlib import Path
-from openhands.llm import llm as llm_module
+
+from openhands.sdk import LLM, LLMSummarizingCondenser
+from openhands.sdk.llm.message import Message as SDKMessage
 from openhands_cli.entrypoint import main
-from openhands.core.config import LLMConfig
-from pydantic import SecretStr
+from openhands_cli.stores.agent_store import AgentStore
 
-# =============================================================================
-# Helper: Decode JWT
-# =============================================================================
-def decode_jwt_payload(token):
+
+def load_config_model() -> str:
+    config_path = Path.home() / ".openhands/config.toml"
+    if config_path.exists():
+        with config_path.open("rb") as f:
+            data = tomllib.load(f)
+        model = data.get("llm", {}).get("model")
+        if isinstance(model, str) and model:
+            return model
+    return "openai/gpt-5.2-codex"
+
+
+def normalize_codex_model(model: str) -> str:
+    model = model.strip()
+    if model.startswith("openai/"):
+        model = model.removeprefix("openai/")
+    if model.startswith("litellm_proxy/"):
+        model = model.removeprefix("litellm_proxy/")
+    return model
+
+
+def load_oauth_payload() -> tuple[str, str | None]:
+    creds_path = Path.home() / ".openhands/auth/openai_oauth.json"
+    if not creds_path.exists():
+        print("Error: Credentials not found. Please run `uv run login.py` first.")
+        sys.exit(1)
+
+    with creds_path.open() as f:
+        creds = json.load(f)
+
+    access_token = creds.get("access_token", "")
+    if not access_token:
+        print("Error: access_token not found in ~/.openhands/auth/openai_oauth.json")
+        sys.exit(1)
+
     try:
-        parts = token.split(".")
-        if len(parts) < 2: return {}
-        payload = parts[1]
-        padded = payload + "=" * (4 - len(payload) % 4)
-        return json.loads(base64.urlsafe_b64decode(padded))
-    except Exception as e:
-        print(f"Warning: Failed to decode JWT: {e}")
-        return {}
+        import base64
 
-# =============================================================================
-# Load Credentials
-# =============================================================================
-creds_path = Path.home() / ".openhands/auth/openai_oauth.json"
-if not creds_path.exists():
-    print("Error: Credentials not found. Please run the login script first or check your setup.")
-    sys.exit(1)
+        payload = access_token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        decoded = json.loads(base64.urlsafe_b64decode(payload))
+        account_id = (
+            decoded.get("https://api.openai.com/auth", {}).get("chatgpt_account_id")
+        )
+        return access_token, account_id
+    except Exception:
+        return access_token, None
 
-with open(creds_path) as f:
-    creds = json.load(f)
 
-access_token = creds.get("access_token")
-if not access_token:
-    print("Error: access_token not found in credentials file.")
-    sys.exit(1)
+def build_subscription_llm(
+    access_token: str, account_id: str | None, model: str, usage_id: str
+):
+    extra_headers = {
+        "originator": "codex_cli_rs",
+        "OpenAI-Beta": "responses=experimental",
+    }
+    if account_id:
+        extra_headers["chatgpt-account-id"] = account_id
 
-payload = decode_jwt_payload(access_token)
-auth_info = payload.get("https://api.openai.com/auth", {})
-account_id = auth_info.get("chatgpt_account_id")
+    llm = LLM(
+        model=f"openai/{model}",
+        base_url="https://chatgpt.com/backend-api/codex",
+        api_key=access_token,
+        extra_headers=extra_headers,
+        litellm_extra_body={"store": False},
+        temperature=None,
+        max_output_tokens=None,
+        stream=True,
+        usage_id=usage_id,
+        reasoning_effort="high",
+        drop_params=True,
+        modify_params=True,
+        caching_prompt=False,
+        native_tool_calling=True,
+        prompt_cache_retention=None,
+        reasoning_summary=None,
+        enable_encrypted_reasoning=False,
+        extended_thinking_budget=None,
+        top_p=None,
+        seed=None,
+    )
+    llm._is_subscription = True
+    llm.max_output_tokens = None
+    llm.temperature = None
+    llm.prompt_cache_retention = None
+    return llm
 
-print(f"Loaded Codex credentials for Account ID: {account_id}")
 
-# =============================================================================
-# Helper: Transform Messages (System -> User Prefix)
-# =============================================================================
-DEFAULT_SYSTEM_MESSAGE = (
-    "You are OpenHands agent, a helpful AI assistant that can interact "
-    "with a computer to solve tasks."
-)
+def patch_agent_store() -> None:
+    desired_model = normalize_codex_model(load_config_model())
+    access_token, account_id = load_oauth_payload()
+    original_load_from_disk = AgentStore.load_from_disk
+    original_to_responses_dict = SDKMessage.to_responses_dict
 
-def inject_system_prefix(input_items, prefix_content):
-    """Inject system prefix into the first user message, or create one."""
-    for item in input_items:
-        if item.get("role") == "user":
-            content = item.get("content")
-            if not isinstance(content, list):
-                # Ensure content is a list of blocks if it was a string
-                # litellm expects str or list[dict]
-                if isinstance(content, str):
-                    content = [{"type": "text", "text": content}]
-                else:
-                    content = []
-            
-            # Now content is a list of dicts. Prepend the prefix.
-            # Convert prefix_content (dict) to litellm format if needed?
-            # prefix_content here is expected to be a dict like {"type": "text", "text": ...}
-            
-            # Litellm format: {"role": "user", "content": [{"type": "text", "text": "..."}]}
-            item["content"] = [prefix_content] + content
-            return
+    def patched_to_responses_dict(self, *, vision_enabled: bool):
+        # Subscription transport is stateless; replaying prior reasoning items with
+        # server-issued rs_* ids causes invalid input references on subsequent turns.
+        if self.role == "assistant" and self.responses_reasoning_item is not None:
+            original_reasoning_item = self.responses_reasoning_item
+            self.responses_reasoning_item = None
+            try:
+                return original_to_responses_dict(self, vision_enabled=vision_enabled)
+            finally:
+                self.responses_reasoning_item = original_reasoning_item
+        return original_to_responses_dict(self, vision_enabled=vision_enabled)
 
-    # No user message found, create a synthetic one at start
-    input_items.insert(0, {"role": "user", "content": [prefix_content]})
+    SDKMessage.to_responses_dict = patched_to_responses_dict
 
-def transform_messages_for_codex(messages):
-    """Transform messages for Codex subscription transport."""
-    # Deep copy to avoid mutating original list
-    msgs = copy.deepcopy(messages)
-    
-    # Extract system messages
-    system_chunks = []
-    input_items = []
-    
-    for m in msgs:
-        role = m.get("role")
-        content = m.get("content")
-        
-        if role == "system":
-            if isinstance(content, str):
-                system_chunks.append(content)
-            elif isinstance(content, list):
-                # handle list of content blocks if any
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        system_chunks.append(block.get("text", ""))
-                    elif isinstance(block, str):
-                        system_chunks.append(block)
-        else:
-            input_items.append(m)
-            
-    # Prepend system prompts to first user message
-    if system_chunks:
-        merged = "\n\n---\n\n".join(system_chunks)
-        prefix_content = {
-            "type": "text", # litellm uses "text" for text blocks
-            "text": f"Context (system prompt):\n{merged}\n\n",
-        }
-        inject_system_prefix(input_items, prefix_content)
-        
-    # Ensure all messages have list content? No, litellm supports strings.
-    # But inject_system_prefix converted the first user message content to list.
-    
-    return input_items
+    def patched_load_from_disk(self):
+        agent = original_load_from_disk(self)
+        if agent is None:
+            return None
 
-# =============================================================================
-# Monkey Patch OpenHands Legacy LLM
-# =============================================================================
-original_init = llm_module.LLM.__init__
+        agent_llm = build_subscription_llm(
+            access_token, account_id, desired_model, "agent"
+        )
+        condenser = agent.condenser
+        if condenser and isinstance(condenser, LLMSummarizingCondenser):
+            condenser_llm = build_subscription_llm(
+                access_token, account_id, desired_model, "condenser"
+            )
+            condenser = condenser.model_copy(update={"llm": condenser_llm})
 
-def patched_init(self, config: LLMConfig, *args, **kwargs):
-    # Check if model is Codex
-    if "codex" in config.model or "gpt-5.2" in config.model:
-        print(f"Injecting Codex Native Auth for {config.model}")
-        
-        # Override config
-        config.api_key = SecretStr(access_token)
-        # Use base URL for Codex
-        config.base_url = "https://chatgpt.com/backend-api/codex" 
-        
-        # Prepare extra headers
-        extra_headers = {
-            "originator": "codex_cli_rs",
-            "OpenAI-Beta": "responses=experimental",
-            "Authorization": f"Bearer {access_token}"
-        }
-        if account_id:
-            extra_headers["chatgpt-account-id"] = account_id
+        return agent.model_copy(update={"llm": agent_llm, "condenser": condenser})
 
-        # Call original init
-        original_init(self, config, *args, **kwargs)
-        
-        # Wrap self._completion to inject headers and transform messages
-        original_completion_func = self._completion
-        
-        def wrapped_completion(*c_args, **c_kwargs):
-            # Inject headers
-            if "extra_headers" in c_kwargs:
-                c_kwargs["extra_headers"].update(extra_headers)
-            else:
-                c_kwargs["extra_headers"] = extra_headers
-            
-            # Transform messages (system -> user prefix)
-            if "messages" in c_kwargs:
-                c_kwargs["messages"] = transform_messages_for_codex(c_kwargs["messages"])
-            
-            # Force stream=True for Codex?
-            # The New SDK LLM sets stream=True.
-            c_kwargs["stream"] = True
-            
-            return original_completion_func(*c_args, **c_kwargs)
-            
-        self._completion = wrapped_completion
-    else:
-        original_init(self, config, *args, **kwargs)
+    AgentStore.load_from_disk = patched_load_from_disk
 
-llm_module.LLM.__init__ = patched_init
+    print(
+        f"Using ChatGPT subscription transport for openai/{desired_model} via "
+        "https://chatgpt.com/backend-api/codex"
+    )
+    if account_id:
+        print(f"Loaded Codex credentials for Account ID: {account_id}")
 
-# =============================================================================
-# Run CLI
-# =============================================================================
+
 if __name__ == "__main__":
+    patch_agent_store()
     sys.exit(main())

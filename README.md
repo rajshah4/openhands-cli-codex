@@ -1,72 +1,76 @@
-# OpenHands Codex Tools
+# OpenHands CLI with ChatGPT Codex Subscription
 
-This repository contains tools to run OpenHands CLI with native OpenAI Codex support via ChatGPT subscription.
+This folder contains the two helper scripts needed to run OpenHands CLI with your ChatGPT Codex subscription instead of paying through an API key or the OpenHands Cloud LLM proxy.
+
+Use this if you want:
+
+- OpenHands CLI
+- OpenAI Codex models such as `gpt-5.3-codex` or `gpt-5.4-codex`
+- authentication through your ChatGPT subscription
 
 ## Files
 
-1.  `openhands-codex`: The CLI runner script.
-2.  `login.py`: Authentication helper.
-3.  `README.md`: Setup instructions (this file).
+- `login.py`: one-time ChatGPT OAuth login helper
+- `openhands-codex`: runner script that starts OpenHands CLI with the required Codex subscription patches
 
-## Quick Start
+## What This Changes
 
-1.  **Clone this repo**:
-    ```bash
-    git clone https://github.com/rajshah4/openhands-cli-codex.git
-    cd openhands-cli-codex
-    ```
+The stock `openhands` CLI does not automatically use your ChatGPT subscription. This runner makes OpenHands CLI talk to the ChatGPT Codex backend directly:
 
-2.  **Install Dependencies**:
-    You need `openhands-cli` and `openhands-sdk`.
-    ```bash
-    uv pip install openhands-ai authlib
-    ```
+```text
+OpenHands CLI -> chatgpt.com/backend-api/codex -> your ChatGPT subscription
+```
 
-3.  **Authenticate**:
-    ```bash
-    uv run login.py
-    ```
+instead of:
 
-4.  **Run**:
-    ```bash
-    uv run ./openhands-codex
-    ```
+```text
+OpenHands CLI -> llm-proxy.app.all-hands.dev -> billed provider/API path
+```
 
 ## Prerequisites
 
-*   **Python 3.10+**
-*   **uv** (recommended for environment management)
-*   **Docker** (required for OpenHands runtime)
-*   **ChatGPT Subscription** (Plus, Pro, or Max)
+- Python 3.10+
+- `uv`
+- Docker
+- a ChatGPT subscription with access to Codex models
 
-## Installation
+## 1. Install OpenHands CLI
 
-1.  **Clone this repo**:
-    ```bash
-    git clone https://github.com/rajshah4/openhands-cli-codex.git
-    cd openhands-cli-codex
-    ```
+Clone or open your OpenHands CLI checkout, then create a virtual environment and install dependencies:
 
-2.  **Set up the environment**:
-    ```bash
-    uv venv
-    source .venv/bin/activate
-    uv pip install openhands-ai authlib
-    ```
+```bash
+uv venv
+source .venv/bin/activate
+uv pip install openhands-ai authlib
+```
 
-## Configuration
+If you are working from the OpenHands source repo instead of a published package, install your local checkout the way that repo expects.
 
-Create or update `~/.openhands/config.toml` to specify the Codex model you want to use.
+## 2. Add These Scripts
+
+Place these files in your OpenHands CLI working directory:
+
+- `login.py`
+- `openhands-codex`
+
+Make the runner executable:
+
+```bash
+chmod +x openhands-codex
+```
+
+## 3. Configure OpenHands
+
+Create or update `~/.openhands/config.toml`:
 
 ```toml
 [llm]
-model = "openai/gpt-5.2-codex"  # Or gpt-5.4-codex, gpt-5.3-codex-spark
+model = "openai/gpt-5.3-codex"
 api_key = "not-needed"
 temperature = 0.0
 
 [sandbox]
-# Add your trusted project directories here
-trusted_dirs = [ "/Users/yourname/Code/yourproject" ]
+trusted_dirs = ["/Users/yourname/Code/yourproject"]
 
 [llm.condenser]
 model = "openai/gpt-5.3-instant"
@@ -74,56 +78,97 @@ api_key = "not-needed"
 temperature = 0.1
 ```
 
-## Scripts
+Notes:
 
-This repo contains two helper scripts:
+- The runner reads `[llm].model` and uses that as the Codex model.
+- The condenser model in `config.toml` does not control the subscription path directly; the runner replaces both the main LLM and condenser at runtime.
+- `api_key = "not-needed"` is just a placeholder so OpenHands config stays happy.
+- Replace `"/Users/yourname/Code/yourproject"` with the actual local project directory you want OpenHands to work in, for example `"/Users/rajiv.shah/Code/litellm"`.
 
-### Script 1: `login.py` (Authentication)
-Handles the OAuth flow with ChatGPT.
+## 4. Authenticate Once
 
-### Script 2: `openhands-codex` (Runner)
-Runs the OpenHands CLI with the necessary patches for native Codex support.
-
-## Usage
-
-### Step 1: Authenticate (One-time)
-
-Run the login script. It will provide a URL to authenticate with your ChatGPT account.
+Run:
 
 ```bash
 uv run login.py
 ```
 
-Follow the instructions in the terminal. Once successful, credentials are saved securely.
+This signs you in with ChatGPT and stores credentials in:
 
-### Step 2: Run OpenHands
-
-Use the `openhands-codex` runner script.
-
-**From the installation directory:**
 ```bash
-uv run ./openhands-codex -t "Create a snake game in python"
+~/.openhands/auth/openai_oauth.json
 ```
 
-**From any directory (Global Access):**
-1.  Update the shebang line in `openhands-codex` to point to the absolute path of your venv python (e.g., `#!/Users/username/Code/OpenHands-CLI/.venv/bin/python3`).
-2.  Add an alias to your shell profile (`~/.zshrc`):
-    ```bash
-    alias openhands-codex="/path/to/OpenHands-CLI/openhands-codex"
-    ```
-3.  Reload shell (`source ~/.zshrc`).
-4.  Run:
-    ```bash
-    openhands-codex -t "Task description"
-    ```
+## 5. Start OpenHands with Codex
 
-## FAQ
+Run:
 
-### Q: Why do I see "litellm_proxy" in the output/name of the model?
-**A:** This is just an internal label OpenHands uses for the connection. It does NOT mean you are running a local proxy server. The connection goes directly to OpenAI (`chatgpt.com`).
+```bash
+uv run ./openhands-codex
+```
 
-### Q: Can I use other models?
-**A:** Yes. Edit `~/.openhands/config.toml` and change the `model` field to any Codex model your account supports (e.g., `openai/gpt-5.4-codex`). The script automatically detects "codex" in the name and applies the correct authentication.
+or:
 
-### Q: What if I see `MCPTimeoutError`?
-**A:** This relates to optional tool servers (like Tavily/Notion). You can usually ignore it or retry. It does not affect the core LLM functionality.
+```bash
+./openhands-codex
+```
+
+If you want a global command:
+
+```bash
+ln -sf /path/to/openhands-codex ~/.local/bin/openhands-codex
+```
+
+Then you can run:
+
+```bash
+openhands-codex
+```
+
+## Optional: Keep Both Cloud and Codex Modes
+
+If you already use the normal `openhands` command for OpenHands Cloud, you can keep both:
+
+```bash
+openhands          # standard OpenHands / Cloud path
+openhands-codex    # ChatGPT subscription Codex path
+```
+
+## Why The Custom Runner Is Needed
+
+OpenHands CLI currently needs a few runtime patches to work cleanly with the ChatGPT Codex subscription backend.
+
+The runner does the following for you:
+
+- loads your ChatGPT OAuth token from `~/.openhands/auth/openai_oauth.json`
+- points requests to `https://chatgpt.com/backend-api/codex`
+- adds the required Codex headers
+- replaces the persisted OpenHands LLM settings at runtime so stale Cloud settings do not win
+- replaces the condenser LLM too
+- strips unsupported request fields such as `prompt_cache_retention`
+- keeps requests stateless with `store=false`
+- avoids replaying prior assistant reasoning items with `rs_*` ids, which break follow-up turns
+
+Without these patches, OpenHands may appear to start correctly but then fail on later requests.
+
+## Troubleshooting
+
+### I still see `llm-proxy.app.all-hands.dev`
+
+That usually means your normal OpenHands CLI is still using persisted Cloud settings from:
+
+```bash
+~/.openhands/agent_settings.json
+```
+
+That is expected for bare `openhands`.
+
+For `openhands-codex`, the runner overrides those settings at runtime, so seeing old saved Cloud config does not necessarily mean the Codex runner is broken.
+
+### Should I continue an old broken session?
+
+No. Restart the `openhands-codex` session after updating the runner.
+
+### Can I change the model?
+
+Yes. Change `[llm].model` in `~/.openhands/config.toml` to another Codex model your account supports, then restart `openhands-codex`.
