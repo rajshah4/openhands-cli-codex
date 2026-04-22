@@ -7,7 +7,7 @@ This folder contains the two helper scripts needed to run OpenHands CLI with you
 Use this if you want:
 
 - OpenHands CLI
-- OpenAI Codex models such as `gpt-5.3-codex` or `gpt-5.4-codex`
+- OpenAI models such as `gpt-5.4` or `gpt-5.3-codex`
 - authentication through your ChatGPT subscription
 
 ## Files
@@ -67,7 +67,7 @@ Create or update `~/.openhands/config.toml`:
 
 ```toml
 [llm]
-model = "openai/gpt-5.3-codex"
+model = "openai/gpt-5.4"
 api_key = "not-needed"
 temperature = 0.0
 
@@ -75,7 +75,7 @@ temperature = 0.0
 trusted_dirs = ["/Users/yourname/Code/yourproject"]
 
 [llm.condenser]
-model = "openai/gpt-5.3-instant"
+model = "openai/gpt-5.4"
 api_key = "not-needed"
 temperature = 0.1
 ```
@@ -86,6 +86,7 @@ Notes:
 - The condenser model in `config.toml` does not control the subscription path directly; the runner replaces both the main LLM and condenser at runtime.
 - `api_key = "not-needed"` is just a placeholder so OpenHands config stays happy.
 - Replace `"/Users/yourname/Code/yourproject"` with the actual local project directory you want OpenHands to work in, for example `"/Users/rajiv.shah/Code/openhands-cli-codex"`.
+- `openai/gpt-5.4` is the current recommended default on this ChatGPT subscription path. Older Codex-specific model ids such as `openai/gpt-5.3-codex` can still work, but `openai/gpt-5.4-codex` is not accepted on ChatGPT-account Codex transport.
 
 ## 4. Authenticate Once
 
