@@ -3,9 +3,17 @@ import json
 import sys
 import tomllib
 from pathlib import Path
+from types import MethodType
 
 from openhands.sdk import LLM, LLMSummarizingCondenser
+from openhands.sdk.event.llm_convertible.message import MessageEvent
 from openhands.sdk.llm.message import Message as SDKMessage
+from openhands.sdk.llm.message import (
+    MessageToolCall,
+    ReasoningItemModel,
+    TextContent,
+    content_to_str,
+)
 from openhands_cli.entrypoint import main
 from openhands_cli.stores.agent_store import AgentStore
 
@@ -94,28 +102,193 @@ def build_subscription_llm(
     llm.max_output_tokens = None
     llm.temperature = None
     llm.prompt_cache_retention = None
+
+    original_responses = llm.responses
+
+    def patched_responses(self, *args, on_token=None, **kwargs):
+        streamed_text_parts: list[str] = []
+
+        def tee_on_token(chunk):
+            try:
+                delta = chunk.choices[0].delta.content
+            except Exception:
+                delta = None
+            if isinstance(delta, str) and delta:
+                streamed_text_parts.append(delta)
+            if on_token is not None:
+                on_token(chunk)
+
+        response = original_responses(*args, on_token=tee_on_token, **kwargs)
+
+        message = response.message
+        if (
+            not message.content
+            and message.tool_calls is None
+            and message.responses_reasoning_item is None
+            and streamed_text_parts
+        ):
+            message.content = [TextContent(text="".join(streamed_text_parts))]
+
+        return response
+
+    object.__setattr__(llm, "responses", MethodType(patched_responses, llm))
     return llm
+
+
+def patch_sdk_response_handling() -> None:
+    original_to_responses_dict = SDKMessage.to_responses_dict
+    original_from_llm_responses_output = SDKMessage.from_llm_responses_output
+    original_tool_call_from_responses = MessageToolCall.from_responses_function_call
+    original_tool_call_to_responses_dict = MessageToolCall.to_responses_dict
+    original_message_event_visualize = MessageEvent.visualize
+    original_message_event_str = MessageEvent.__str__
+
+    def _get_optional_text(part) -> str | None:
+        text = getattr(part, "text", None)
+        if isinstance(text, str) and text:
+            return text
+        refusal = getattr(part, "refusal", None)
+        if isinstance(refusal, str) and refusal:
+            return refusal
+        return None
+
+    @classmethod
+    def patched_from_responses_function_call(cls, item):
+        tool_call = original_tool_call_from_responses(item)
+        phase = getattr(item, "phase", None)
+        if phase:
+            object.__setattr__(tool_call, "_responses_phase", phase)
+        return tool_call
+
+    def patched_tool_call_to_responses_dict(self):
+        data = original_tool_call_to_responses_dict(self)
+        phase = getattr(self, "_responses_phase", None)
+        if phase:
+            data["phase"] = phase
+        return data
+
+    def patched_to_responses_dict(self, *, vision_enabled: bool):
+        # Subscription transport is stateless; replaying prior reasoning items with
+        # server-issued rs_* ids causes invalid input references on subsequent turns.
+        original_reasoning_item = None
+        if self.role == "assistant" and self.responses_reasoning_item is not None:
+            original_reasoning_item = self.responses_reasoning_item
+            self.responses_reasoning_item = None
+
+        try:
+            items = original_to_responses_dict(self, vision_enabled=vision_enabled)
+        finally:
+            if original_reasoning_item is not None:
+                self.responses_reasoning_item = original_reasoning_item
+
+        if self.role != "assistant":
+            return items
+
+        phase = getattr(self, "_responses_phase", None)
+        if not phase:
+            return items
+
+        for item in items:
+            if item.get("type") == "message" and item.get("role") == "assistant":
+                item["phase"] = phase
+            elif item.get("type") == "function_call":
+                item["phase"] = phase
+        return items
+
+    @classmethod
+    def patched_from_llm_responses_output(cls, output):
+        message = original_from_llm_responses_output(output)
+
+        assistant_text_parts: list[str] = []
+        tool_calls: list[MessageToolCall] = []
+        responses_reasoning_item: ReasoningItemModel | None = None
+        phase: str | None = None
+
+        for item in output or []:
+            item_type = getattr(item, "type", None)
+
+            if item_type == "message":
+                if phase is None:
+                    phase = getattr(item, "phase", None)
+
+                for part in getattr(item, "content", None) or []:
+                    extracted = _get_optional_text(part)
+                    if extracted:
+                        assistant_text_parts.append(extracted)
+            elif item_type == "function_call":
+                tc = MessageToolCall.from_responses_function_call(item)
+                tool_calls.append(tc)
+                if phase is None:
+                    phase = getattr(item, "phase", None)
+            elif item_type == "reasoning":
+                summaries = getattr(item, "summary", None) or []
+                contents = getattr(item, "content", None) or []
+                summary_list = [s.text for s in summaries if getattr(s, "text", None)]
+                content_list = [c.text for c in contents if getattr(c, "text", None)]
+                responses_reasoning_item = ReasoningItemModel(
+                    id=getattr(item, "id", None),
+                    summary=summary_list,
+                    content=content_list or None,
+                    encrypted_content=getattr(item, "encrypted_content", None),
+                    status=getattr(item, "status", None),
+                )
+
+        assistant_text = "\n".join(assistant_text_parts).strip()
+        if assistant_text:
+            message.content = [TextContent(text=assistant_text)]
+        if tool_calls:
+            message.tool_calls = tool_calls
+        if responses_reasoning_item is not None:
+            message.responses_reasoning_item = responses_reasoning_item
+        if phase:
+            object.__setattr__(message, "_responses_phase", phase)
+        return message
+
+    @property
+    def patched_message_event_visualize(self):
+        text_parts = content_to_str(self.llm_message.content)
+        if text_parts:
+            return original_message_event_visualize.fget(self)
+
+        tool_calls = self.llm_message.tool_calls or []
+        if tool_calls:
+            from rich.text import Text
+
+            content = Text()
+            names = ", ".join(tc.name for tc in tool_calls)
+            content.append(f"[assistant emitted tool call(s): {names}]")
+            reasoning_item = self.llm_message.responses_reasoning_item
+            if reasoning_item is not None:
+                content.append("\n\nReasoning:\n", style="bold")
+                for summary in reasoning_item.summary:
+                    content.append(f"- {summary}\n")
+                for block in reasoning_item.content or []:
+                    content.append(f"{block}\n")
+            return content
+
+        return original_message_event_visualize.fget(self)
+
+    def patched_message_event_str(self) -> str:
+        text_parts = content_to_str(self.llm_message.content)
+        if text_parts or not self.llm_message.tool_calls:
+            return original_message_event_str(self)
+
+        call_names = ", ".join(tc.name for tc in self.llm_message.tool_calls)
+        return f"MessageEvent ({self.source})\n  assistant: [tool calls: {call_names}]"
+
+    MessageToolCall.from_responses_function_call = patched_from_responses_function_call
+    MessageToolCall.to_responses_dict = patched_tool_call_to_responses_dict
+    SDKMessage.to_responses_dict = patched_to_responses_dict
+    SDKMessage.from_llm_responses_output = patched_from_llm_responses_output
+    MessageEvent.visualize = patched_message_event_visualize
+    MessageEvent.__str__ = patched_message_event_str
 
 
 def patch_agent_store() -> None:
     desired_model = normalize_codex_model(load_config_model())
     access_token, account_id = load_oauth_payload()
     original_load_from_disk = AgentStore.load_from_disk
-    original_to_responses_dict = SDKMessage.to_responses_dict
-
-    def patched_to_responses_dict(self, *, vision_enabled: bool):
-        # Subscription transport is stateless; replaying prior reasoning items with
-        # server-issued rs_* ids causes invalid input references on subsequent turns.
-        if self.role == "assistant" and self.responses_reasoning_item is not None:
-            original_reasoning_item = self.responses_reasoning_item
-            self.responses_reasoning_item = None
-            try:
-                return original_to_responses_dict(self, vision_enabled=vision_enabled)
-            finally:
-                self.responses_reasoning_item = original_reasoning_item
-        return original_to_responses_dict(self, vision_enabled=vision_enabled)
-
-    SDKMessage.to_responses_dict = patched_to_responses_dict
+    patch_sdk_response_handling()
 
     def patched_load_from_disk(self):
         agent = original_load_from_disk(self)
